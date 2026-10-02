@@ -1,0 +1,227 @@
+name: Build Mesa GBM for UOS20 arm64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Mesa 21.1.8 GBM arm64 glibc 2.28
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      # JavaScript action 在 Ubuntu 宿主执行；仅源码构建放入 Buster。
+      # 本流程只下载上游源码，无须 checkout 仓库。
+      - name: Write build script
+        shell: bash
+        run: |
+          cat > build-mesa-gbm.sh <<'BUILD_SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          printf '%s\n' \
+            'deb http://archive.debian.org/debian/ buster main' \
+            'deb http://archive.debian.org/debian/ buster-updates main' \
+            'deb http://archive.debian.org/debian-security/ buster/updates main' \
+            > /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update
+
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl xz-utils \
+            gcc g++ libc6-dev binutils file \
+            pkg-config ninja-build \
+            python3 python3-pip python3-mako \
+            bison flex \
+            libdrm-dev libexpat1-dev zlib1g-dev
+
+          python3 -m pip install --no-cache-dir 'meson==0.59.4'
+
+          echo "=== build environment ==="
+          uname -m
+          ldd --version | sed -n '1p'
+          gcc --version | sed -n '1p'
+          python3 --version
+          meson --version
+          ninja --version
+          dpkg-query -W libdrm2 libdrm-dev
+
+          curl --retry 3 -fL \
+            https://archive.mesa3d.org/older-versions/21.x/mesa-21.1.8.tar.xz \
+            -o mesa-21.1.8.tar.xz
+
+          echo \
+            '5cd32f5d089dca75300578a3d771a656eaed652090573a2655fe4e7022d56bfc  mesa-21.1.8.tar.xz' \
+            | sha256sum -c -
+
+          tar -xf mesa-21.1.8.tar.xz
+
+          cd mesa-21.1.8
+
+          # 保留空的驱动列表，但显式选择 GBM 所需的 DRI 后端代码。
+          # 这是本测试包的局部构建修正，不是上游原样构建。
+          python3 - <<'PY_PATCH'
+          from pathlib import Path
+          path = Path('meson.build')
+          source = path.read_text()
+          old = 'with_dri = dri_drivers.length() != 0'
+          assert source.count(old) == 1, 'Mesa build layout changed; stop and review'
+          new = old + " or get_option('gbm') == 'enabled'"
+          path.write_text(source.replace(old, new))
+          PY_PATCH
+          meson setup build \
+            --prefix=/opt/mesa21 \
+            --libdir=lib \
+            --buildtype=release \
+            --auto-features=disabled \
+            -Dplatforms= \
+            -Ddri-search-path=/usr/lib/aarch64-linux-gnu/dri \
+            -Dgbm=enabled \
+            -Degl=disabled \
+            -Dglx=disabled \
+            -Dopengl=false \
+            -Dgles1=disabled \
+            -Dgles2=disabled \
+            -Dgallium-drivers= \
+            -Ddri-drivers= \
+            -Dvulkan-drivers= \
+            -Dllvm=disabled \
+            -Dosmesa=false \
+            -Dzstd=disabled
+
+          # 后端必须实际参与编译，不能只验收导出符号。
+          python3 - <<'PY_BACKEND'
+          import json
+          from pathlib import Path
+          commands = json.loads(Path('build/compile_commands.json').read_text())
+          backend = [x for x in commands if x['file'].endswith('/gbm_dri.c')]
+          assert backend, 'GBM DRI backend not selected; stop'
+          assert all('-DHAVE_DRI' in x.get('command', ' '.join(x.get('arguments', [])))
+                     for x in backend), 'HAVE_DRI missing; stop'
+          PY_BACKEND
+          ninja -C build
+          DESTDIR=/work/stage ninja -C build install
+          cd /work
+
+          LIB=stage/opt/mesa21/lib/libgbm.so.1
+
+          test -e "$LIB"
+
+          echo "=== file ==="
+          file "$LIB"
+
+          echo "=== ELF ==="
+          readelf -h "$LIB" | grep -E 'Class|Machine'
+          readelf -h "$LIB" | grep -q 'Machine:.*AArch64'
+
+          echo "=== required symbol ==="
+          nm -D "$LIB" | grep ' gbm_bo_get_fd_for_plane$'
+
+          echo "=== dependencies ==="
+          readelf -d "$LIB" | grep NEEDED
+
+          echo "=== GLIBC symbols ==="
+          objdump -T "$LIB" 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9.]+' \
+            | sort -Vu
+
+          MAX=$(
+            objdump -T "$LIB" 2>/dev/null \
+              | grep -oE 'GLIBC_2\.[0-9]+' \
+              | sed 's/GLIBC_//' \
+              | sort -V \
+              | tail -1
+          )
+
+          test -n "$MAX"
+          echo "highest required GLIBC: $MAX"
+
+          HIGH=$(printf '%s\n' "$MAX" "2.28" | sort -V | tail -1)
+          test "$HIGH" = "2.28"
+
+          # 记录构建配置和依赖，供目标机排查。
+          meson configure mesa-21.1.8/build > stage/opt/mesa21/build-options.txt
+          readelf -d "$LIB" > stage/opt/mesa21/libgbm-needed.txt
+          cp gbm-smoke.c stage/opt/mesa21/
+          mkdir -p stage/opt/mesa21/bin
+          gcc -Wall -Wextra -Werror -O2 gbm-smoke.c \
+            -Istage/opt/mesa21/include -Lstage/opt/mesa21/lib -lgbm \
+            -o stage/opt/mesa21/bin/gbm-smoke
+          readelf -h stage/opt/mesa21/bin/gbm-smoke | grep -q 'Machine:.*AArch64'
+          python3 - <<'PY_ABI'
+          import re, subprocess
+          for path in ('stage/opt/mesa21/lib/libgbm.so.1',
+                       'stage/opt/mesa21/bin/gbm-smoke'):
+              output = subprocess.check_output(['readelf', '--version-info', path], text=True)
+              versions = [tuple(map(int, x.split('.')))
+                          for x in re.findall(r'GLIBC_(\d+(?:\.\d+)+)', output)]
+              assert versions and max(versions) <= (2, 28), (path, versions)
+          PY_ABI
+          # Buster 用户态内加载一次；这里没有目标 GPU，只检查动态链接。
+          LD_LIBRARY_PATH=/work/stage/opt/mesa21/lib \
+            stage/opt/mesa21/bin/gbm-smoke --load-only
+          tar -C stage -czf mesa21-gbm-uos20-arm64.tar.gz opt/mesa21
+          sha256sum mesa21-gbm-uos20-arm64.tar.gz \
+            > mesa21-gbm-uos20-arm64.tar.gz.sha256
+
+          BUILD_SCRIPT
+
+      - name: Write GBM smoke probe
+        shell: bash
+        run: |
+          cat > gbm-smoke.c <<'C_SOURCE'
+          #include <gbm.h>
+          #include <fcntl.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <unistd.h>
+
+          int main(int argc, char **argv) {
+            if (argc == 2 && strcmp(argv[1], "--load-only") == 0) {
+              puts("dynamic load OK; GPU not tested");
+              return 0;
+            }
+            if (argc != 2) {
+              fprintf(stderr, "usage: %s /dev/dri/renderDxxx\n", argv[0]);
+              return 2;
+            }
+            int fd = open(argv[1], O_RDWR | O_CLOEXEC);
+            if (fd < 0) { perror("open DRM node"); return 1; }
+            struct gbm_device *dev = gbm_create_device(fd);
+            if (!dev) { perror("gbm_create_device"); close(fd); return 1; }
+            printf("backend: %s\n", gbm_device_get_backend_name(dev));
+            struct gbm_bo *bo = gbm_bo_create(dev, 64, 64,
+              GBM_FORMAT_ARGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+            int failed = 0;
+            if (!bo) { perror("gbm_bo_create"); failed = 1; }
+            else {
+              int planes = gbm_bo_get_plane_count(bo);
+              if (planes <= 0) { fprintf(stderr, "invalid plane count\n"); failed = 1; }
+              for (int i = 0; i < planes; ++i) {
+                int plane_fd = gbm_bo_get_fd_for_plane(bo, i);
+                if (plane_fd < 0) { perror("gbm_bo_get_fd_for_plane"); failed = 1; }
+                else { printf("plane %d export OK\n", i); close(plane_fd); }
+              }
+              gbm_bo_destroy(bo);
+            }
+            gbm_device_destroy(dev);
+            close(fd);
+            return failed;
+          }
+          C_SOURCE
+
+      - name: Build in Buster arm64
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            debian:buster bash /work/build-mesa-gbm.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesa21-gbm-uos20-arm64
+          path: |
+            mesa21-gbm-uos20-arm64.tar.gz
+            mesa21-gbm-uos20-arm64.tar.gz.sha256
+          if-no-files-found: error
