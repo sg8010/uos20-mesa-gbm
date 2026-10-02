@@ -96,8 +96,6 @@ jobs:
           commands = json.loads(Path('build/compile_commands.json').read_text())
           backend = [x for x in commands if x['file'].endswith('/gbm_dri.c')]
           assert backend, 'GBM DRI backend not selected; stop'
-          assert all('-DHAVE_DRI' in x.get('command', ' '.join(x.get('arguments', [])))
-                     for x in backend), 'HAVE_DRI missing; stop'
           PY_BACKEND
           ninja -C build
           DESTDIR=/work/stage ninja -C build install

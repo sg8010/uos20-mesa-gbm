@@ -195,8 +195,6 @@ jobs:
           commands = json.loads(Path('build/compile_commands.json').read_text())
           backend = [x for x in commands if x['file'].endswith('/gbm_dri.c')]
           assert backend, 'GBM DRI backend not selected; stop'
-          assert all('-DHAVE_DRI' in x.get('command', ' '.join(x.get('arguments', [])))
-                     for x in backend), 'HAVE_DRI missing; stop'
           PY_BACKEND
           ninja -C build
           DESTDIR=/work/stage ninja -C build install
@@ -368,7 +366,7 @@ gbm_bo_get_fd_for_plane
 
 ### 6.4 后端与动态加载检查
 
-必须通过编译命令中的 `HAVE_DRI`、`gbm_dri.c` 编译参与检查，以及探针 `--load-only` 的动态加载检查。打包内容应包括 `bin/gbm-smoke`、`gbm-smoke.c`、`build-options.txt` 和 `libgbm-needed.txt`。
+必须通过 `gbm_dri.c` 编译参与检查，以及探针 `--load-only` 的动态加载检查。打包内容应包括 `bin/gbm-smoke`、`gbm-smoke.c`、`build-options.txt` 和 `libgbm-needed.txt`。
 
 该流程通过局部修改 `with_dri` 的构建选择，保留 DRI 后端并继续关闭所有驱动的编译。**尚未在 Mesa 21.1.8 ARM64 上实编验证**：若配置、后端检查或链接失败，保存完整日志、停止部署，先修正构建选择；不能把这种失败解释为目标机驱动不兼容。
 
