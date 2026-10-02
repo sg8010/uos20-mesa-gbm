@@ -88,7 +88,7 @@ Mesa 21.1.8 源码 SHA256：
 
 ## 5. GitHub Actions workflow
 
-以下是待 CI 验证的候选构建流程，不代表已经在 ARM64 runner 或 UOS 实机跑通。它包含一个明确的 Mesa 构建选择修正，源码断言不满足时立即停止，不能跳过断言继续打包。
+以下流程已于 2026-10-02 在 ARM64 GitHub runner 的 Buster 容器中构建成功（见第 15 节），尚未进行 UOS 实机测试。它包含一个明确的 Mesa 构建选择修正，源码断言不满足时立即停止，不能跳过断言继续打包。
 
 将下面内容完整保存为：
 
@@ -368,7 +368,7 @@ gbm_bo_get_fd_for_plane
 
 必须通过 `gbm_dri.c` 编译参与检查，以及探针 `--load-only` 的动态加载检查。打包内容应包括 `bin/gbm-smoke`、`gbm-smoke.c`、`build-options.txt` 和 `libgbm-needed.txt`。
 
-该流程通过局部修改 `with_dri` 的构建选择，保留 DRI 后端并继续关闭所有驱动的编译。**尚未在 Mesa 21.1.8 ARM64 上实编验证**：若配置、后端检查或链接失败，保存完整日志、停止部署，先修正构建选择；不能把这种失败解释为目标机驱动不兼容。
+该流程通过局部修改 `with_dri` 的构建选择，让 `with_dri2` 选择 GBM DRI 后端，并继续关闭所有驱动的编译。已在 Mesa 21.1.8 ARM64 上实编验证，日志确认编译了 `backends_dri_gbm_dri.c.o`。该版本没有本流程先前假设的 `HAVE_DRI` 编译宏，因此检查以实际后端源文件为准。若后续配置、后端检查或链接失败，保存完整日志、停止部署，先修正构建选择；不能把这种失败解释为目标机驱动不兼容。
 
 ### 6.5 产生 Artifact
 
@@ -664,7 +664,15 @@ LLVM
 | 实际路径 | GPU 子进程 PID、GBM/DRI/libdrm 映射、renderer |
 | 结果 | 白屏是否复现、两条错误是否出现、GPU 进程是否稳定 |
 
-**本说明的状态：** workflow 和探针是候选实现，尚未执行 ARM64 CI 或 UOS 实机验收。静态检查、CI 构建成功、探针成功与 Chrome 硬件路径恢复是不同层级的证据，应分别报告。
+**已验证记录（2026-10-02）：**
+
+- 公开仓库：[sg8010/uos20-mesa-gbm](https://github.com/sg8010/uos20-mesa-gbm)。
+- 成功构建：[Actions run 37001963086](https://github.com/sg8010/uos20-mesa-gbm/actions/runs/37001963086)，构建提交 `29d76ad`。
+- 原生 ARM64 runner、Buster 容器；库及探针均为 AArch64，最高所需 GLIBC 为 **2.17**，符合 ≤ 2.28。
+- 实际编译 GBM DRI 后端，库导出 `gbm_bo_get_fd_for_plane`；探针在 Buster 中 `--load-only` 成功。
+- Artifact 下载后 SHA256 校验通过；包含 GBM、探针及构建信息，没有私有 libdrm、EGL 或 radeonsi 驱动。
+
+**未验证：** UOS 目标机的 DRI 驱动加载、GPU buffer 创建及导出、Chrome 白屏是否恢复。CI 的探针只执行动态加载检查，没有执行带 DRM 节点的功能测试。各层证据应分别报告。
 
 参考依据：
 
